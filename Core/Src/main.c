@@ -26,6 +26,24 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+typedef struct __attribute__((packed)) 
+{
+    uint8_t  header;        // 0xAC
+    uint8_t  sequence;      // Rolling counter
+    uint32_t timestamp;     // HAL_GetTick() 
+    uint8_t  ad7193_ch0[3]; // 24-bit channel 0 (MSB first)
+    uint8_t  ad7193_ch1[3]; // 24-bit channel 1 (MSB first)
+    uint16_t stm32_adc;     // 16-bit internal ADC
+    uint16_t crc;           // CRC-16
+} DataPacket_t;
+
+typedef enum 
+{
+  IGNITER_IDLE, 
+  IGNITER_FIRING,
+  IGNITER_PILOT, 
+  IGNITER_COMPLETE
+} igniterState_t;
 
 /* USER CODE END PTD */
 
@@ -45,6 +63,11 @@
 #define UART_BUFFER_LEN 4
 
 #define UART_TIMEOUT 10
+
+#define DATA_HEADER 0xAC
+
+#define PILOT_VALVE_DELAY 5000
+#define IGNITER_TURN_OFF 10000
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -93,6 +116,9 @@ void sendAck(uint8_t cmd, GPIO_PinState state) {
     HAL_UART_Transmit(&huart1, ack, 4, UART_TIMEOUT);
 }
 
+volatile igniterState_t state = IGNITER_IDLE;
+volatile uint32_t igniter_start = 0;
+
 void handleCommand(uint8_t cmd, uint8_t val)
 {
   GPIO_TypeDef *port = NULL;
@@ -103,8 +129,31 @@ void handleCommand(uint8_t cmd, uint8_t val)
     case CMD_IGNITER:
       port = IGINITER_GPIO_Port;
       pin = IGINITER_Pin;
-      break;
+      
+      if (val == CMD_ON)
+      {
+        HAL_GPIO_WritePin(IGINITER_GPIO_Port, IGINITER_Pin, GPIO_PIN_SET);
+        state = IGNITER_FIRING;
+        igniter_start = HAL_GetTick();
 
+        GPIO_PinState curr = HAL_GPIO_ReadPin(port, pin);
+        sendAck(cmd, curr);
+        return;
+      }
+      else if (val == CMD_OFF)
+      {
+        // abort!!!!
+        HAL_GPIO_WritePin(IGINITER_GPIO_Port, IGINITER_Pin, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(PILOT_VALVE_GPIO_Port, PILOT_VALVE_Pin, GPIO_PIN_RESET);
+        state = IGNITER_IDLE;
+        
+        GPIO_PinState curr = HAL_GPIO_ReadPin(port, pin);
+        sendAck(cmd, curr);
+        return;
+      }
+  }
+  switch (cmd)
+  {
     case CMD_PILOT:
       port = PILOT_VALVE_GPIO_Port;
       pin = PILOT_VALVE_Pin;
@@ -141,6 +190,41 @@ void handleCommand(uint8_t cmd, uint8_t val)
   sendAck(cmd, curr);
 }
 
+void handleIgniterSequence(void)
+{
+  uint32_t elapsed; 
+
+  switch (state)
+  {
+    case IGNITER_IDLE:
+      break;
+    case IGNITER_FIRING:
+      elapsed = HAL_GetTick() - igniter_start;
+      if (elapsed >= PILOT_VALVE_DELAY)
+      {
+        HAL_GPIO_WritePin(PILOT_VALVE_GPIO_Port, PILOT_VALVE_Pin, GPIO_PIN_SET);
+        state = IGNITER_PILOT;
+      }
+      break;
+    case IGNITER_PILOT:
+      elapsed = HAL_GetTick() - igniter_start;
+      if (elapsed > IGNITER_TURN_OFF)
+      {
+        HAL_GPIO_WritePin(IGINITER_GPIO_Port, IGINITER_Pin, GPIO_PIN_RESET);
+        state = IGNITER_COMPLETE;
+      }
+      break;
+    case IGNITER_COMPLETE:
+      state = IGNITER_IDLE;
+      break;
+  }
+}
+
+void ad7193_init()
+{
+  // TODO
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -175,6 +259,7 @@ int main(void)
   MX_SPI1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  ad7193_init();
   HAL_UART_Receive_IT(&huart1, uart_rx_buf, UART_BUFFER_LEN);
   /* USER CODE END 2 */
 
@@ -183,7 +268,7 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-
+    handleIgniterSequence();
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
@@ -353,6 +438,11 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
     HAL_UART_Receive_IT(&huart1, uart_rx_buf, UART_BUFFER_LEN);
   }
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  // interrupt handler for AD7193
 }
 /* USER CODE END 4 */
 
