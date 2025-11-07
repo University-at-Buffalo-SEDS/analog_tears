@@ -31,7 +31,20 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define CMD_HEADER 0xAA
+#define ACK_HEADER 0xAB
 
+#define CMD_IGNITER 'I'
+#define CMD_SPARE 'S'
+#define CMD_TANKS 'T'
+#define CMD_PILOT 'P'
+
+#define CMD_ON 0x01
+#define CMD_OFF 0x02
+
+#define UART_BUFFER_LEN 4
+
+#define UART_TIMEOUT 10
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -59,6 +72,74 @@ static void MX_USART1_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+uint8_t uart_rx_buf[UART_BUFFER_LEN];
+
+uint8_t computeCRC(uint8_t *data, uint8_t len)
+{
+  uint8_t crc = 0;
+  for (int i = 0; i < len; i++)
+  {
+    crc ^= data[i];
+  }
+  return crc;
+}
+
+void sendAck(uint8_t cmd, GPIO_PinState state) {
+    uint8_t ack[4];
+    ack[0] = ACK_HEADER;
+    ack[1] = cmd;
+    ack[2] = (state == GPIO_PIN_SET) ? 1 : 0;
+    ack[3] = computeCRC(ack, 3);
+    HAL_UART_Transmit(&huart1, ack, 4, UART_TIMEOUT);
+}
+
+void handleCommand(uint8_t cmd, uint8_t val)
+{
+  GPIO_TypeDef *port = NULL;
+  uint16_t pin;
+
+  switch (cmd)
+  {
+    case CMD_IGNITER:
+      port = IGINITER_GPIO_Port;
+      pin = IGINITER_Pin;
+      break;
+
+    case CMD_PILOT:
+      port = PILOT_VALVE_GPIO_Port;
+      pin = PILOT_VALVE_Pin;
+      break;
+
+    case CMD_TANKS:
+      port = TANKS_GPIO_Port;
+      pin = TANKS_Pin;
+      break;
+
+    case CMD_SPARE:
+      port = SPARE_GPIO_Port;
+      pin = SPARE_Pin;
+      break;
+
+    default:
+      return;
+  }
+  switch (val)
+  {
+    case CMD_ON:
+      HAL_GPIO_WritePin(port, pin, GPIO_PIN_SET);
+      break;
+
+    case CMD_OFF:
+      HAL_GPIO_WritePin(port, pin, GPIO_PIN_RESET);
+      break;
+
+    default:
+      return;
+  }
+
+  GPIO_PinState curr = HAL_GPIO_ReadPin(port, pin);
+  sendAck(cmd, curr);
+}
 
 /* USER CODE END 0 */
 
@@ -94,7 +175,7 @@ int main(void)
   MX_SPI1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  HAL_UART_Receive_IT(&huart1, uart_rx_buf, UART_BUFFER_LEN);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -257,7 +338,22 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART1)
+  {
+    uint8_t header = uart_rx_buf[0];
+    uint8_t cmd    = uart_rx_buf[1];
+    uint8_t val    = uart_rx_buf[2];
+    uint8_t crc    = uart_rx_buf[3];
 
+    if (header == CMD_HEADER && computeCRC(uart_rx_buf, 3) == crc)
+    {
+      handleCommand(cmd, val);
+    }
+    HAL_UART_Receive_IT(&huart1, uart_rx_buf, UART_BUFFER_LEN);
+  }
+}
 /* USER CODE END 4 */
 
 /**
