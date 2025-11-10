@@ -8,3 +8,5 @@ build.ninja
 compile_commands.json
 
 
+
+.DS_Store
