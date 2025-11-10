@@ -21,7 +21,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdint.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -83,6 +84,9 @@ UART_HandleTypeDef huart1;
 /* USER CODE BEGIN PV */
 uint8_t ack_buffer[4];
 volatile uint8_t ack_busy = 0;
+
+volatile uint8_t cmd_rdy = 0;
+uint8_t cmd_buf[UART_BUFFER_LEN];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -112,12 +116,11 @@ void sendAck(uint8_t cmd, GPIO_PinState state)
 {
     while (ack_busy);
     ack_busy = 1;
-    uint8_t ack[4];
-    ack[0] = ACK_HEADER;
-    ack[1] = cmd;
-    ack[2] = (state == GPIO_PIN_SET) ? 1 : 0;
-    ack[3] = computeCRC(ack, 3);
-    HAL_UART_Transmit_IT(&huart1, ack, 4);
+    ack_buffer[0] = ACK_HEADER;
+    ack_buffer[1] = cmd;
+    ack_buffer[2] = (state == GPIO_PIN_SET) ? 1 : 0;
+    ack_buffer[3] = computeCRC(ack_buffer, 3);
+    HAL_UART_Transmit_IT(&huart1, ack_buffer, 4);
 }
 
 volatile igniterState_t state = IGNITER_IDLE;
@@ -275,6 +278,13 @@ int main(void)
   {
     /* USER CODE END WHILE */
     handleIgniterSequence();
+    if (cmd_rdy)
+    {
+      cmd_rdy = 0;
+      uint8_t cmd = cmd_buf[1];
+      uint8_t val = cmd_buf[2];
+      handleCommand(cmd, val);
+    }
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
@@ -433,14 +443,15 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART1)
   {
-    uint8_t header = uart_rx_buf[0];
-    uint8_t cmd    = uart_rx_buf[1];
-    uint8_t val    = uart_rx_buf[2];
-    uint8_t crc    = uart_rx_buf[3];
-
-    if (header == CMD_HEADER && computeCRC(uart_rx_buf, 3) == crc)
+    if (cmd_rdy == 0)
     {
-      handleCommand(cmd, val);
+      uint8_t header = uart_rx_buf[0];
+      uint8_t crc = uart_rx_buf[3];
+      if (header == CMD_HEADER && computeCRC(uart_rx_buf, (UART_BUFFER_LEN-1)) == crc)
+      {
+        memcpy(cmd_buf, uart_rx_buf, UART_BUFFER_LEN);
+        cmd_rdy = 1;
+      }
     }
     HAL_UART_Receive_IT(&huart1, uart_rx_buf, UART_BUFFER_LEN);
   }
