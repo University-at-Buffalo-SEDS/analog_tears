@@ -27,13 +27,15 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+#define CHANNELS 2
+#define READY_MASK 0b00000011
+
 typedef struct __attribute__((packed))
 {
     uint8_t  header;        // 0xAC
     uint8_t  sequence;      // Rolling counter
     uint32_t timestamp;     // HAL_GetTick()
-    uint8_t  ad7193_ch0[3]; // 24-bit channel 0 (MSB first)
-    uint8_t  ad7193_ch1[3]; // 24-bit channel 1 (MSB first)
+    uint8_t  ad7193_data[CHANNELS][3]; // 24-bit channel (MSB first)
     uint16_t stm32_adc;     // 16-bit internal ADC
     uint16_t crc;           // CRC-16
 } DataPacket_t;
@@ -77,6 +79,9 @@ typedef enum
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc1;
+DMA_HandleTypeDef hdma_adc1;
+
 SPI_HandleTypeDef hspi1;
 
 UART_HandleTypeDef huart1;
@@ -85,18 +90,27 @@ PCD_HandleTypeDef hpcd_USB_FS;
 
 /* USER CODE BEGIN PV */
 uint8_t ack_buffer[4];
-volatile uint8_t ack_busy = 0;
+volatile uint8_t uart_busy = 0;
 
 volatile uint8_t cmd_rdy = 0;
 uint8_t cmd_buf[UART_BUFFER_LEN];
+
+volatile uint8_t ad7193_ready = 0;
+volatile uint16_t internal_adc_buffer[1];
+uint8_t fresh_mask = 0;
+uint8_t sequence = 0;
+uint8_t ad7193_buffer[CHANNELS][3];
+DataPacket_t data_packet;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USB_PCD_Init(void);
+static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -115,10 +129,15 @@ uint8_t computeCRC(uint8_t *data, uint8_t len)
   return crc;
 }
 
+uint16_t computeCRC_16(const uint8_t *data, uint16_t len)
+{
+  // TODO
+}
+
 void sendAck(uint8_t cmd, GPIO_PinState state)
 {
-    while (ack_busy);
-    ack_busy = 1;
+    while (uart_busy);
+    uart_busy = 1;
     ack_buffer[0] = ACK_HEADER;
     ack_buffer[1] = cmd;
     ack_buffer[2] = (state == GPIO_PIN_SET) ? 1 : 0;
@@ -268,21 +287,50 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_SPI1_Init();
   MX_USART1_UART_Init();
   MX_USB_PCD_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
   ad7193_init();
   HAL_UART_Receive_IT(&huart1, uart_rx_buf, UART_BUFFER_LEN);
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)internal_adc_buffer, 1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    handleIgniterSequence();
+    if (cmd_rdy)
+    {
+      // atomic clear
+      __disable_irq();
+      cmd_rdy = 0;
+      uint8_t cmd = cmd_buf[1];
+      uint8_t val = cmd_buf[2];
+      __enable_irq();
+      handleCommand(cmd, val);
+    }
+    if (ad7193_ready)
+    {
+      ad7193_ready = 0;
+      /**
+      1. Read over SPI when interrupt is triggered
+      2. Identify channel -> curr_channel
+      3. Store three bytes in ad7193_buffer[curr_channel]
+      4. Update fresh_mask for the current channel (fresh_mask |= 1 << curr_channel)
+      5. Check if fresh_mask == READY_MASK
+         a. Collect internal ADC data from DMA buffer
+         b. Send packet over non-blocking call
+         c. Reset fresh_mask flag
+      */
+    }
   }
   /* USER CODE END 3 */
 }
@@ -325,12 +373,60 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USB;
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC|RCC_PERIPHCLK_USB;
+  PeriphClkInit.AdcClockSelection = RCC_ADCPCLK2_DIV6;
   PeriphClkInit.UsbClockSelection = RCC_USBCLKSOURCE_PLL_DIV1_5;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Common config
+  */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc1.Init.ContinuousConvMode = ENABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.NbrOfConversion = 1;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_0;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
 }
 
 /**
@@ -436,6 +532,22 @@ static void MX_USB_PCD_Init(void)
 }
 
 /**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Channel1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -453,12 +565,16 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(ADC_CS_GPIO_Port, ADC_CS_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, PILOT_VALVE_Pin|TANKS_Pin|IGINITER_Pin|SPARE_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : ADC_CS_Pin */
   GPIO_InitStruct.Pin = ADC_CS_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(ADC_CS_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PILOT_VALVE_Pin TANKS_Pin IGINITER_Pin SPARE_Pin */
@@ -502,13 +618,16 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART1)
   {
-    ack_busy = 0;
+    uart_busy = 0;
   }
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-  // interrupt handler for AD7193
+  if (GPIO_Pin == DATA_READY_Pin)
+  {
+    ad7193_ready = 1;
+  }
 }
 /* USER CODE END 4 */
 
