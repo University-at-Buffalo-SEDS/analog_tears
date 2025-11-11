@@ -67,6 +67,8 @@ void Error_Handler(void);
 #define IGINITER_GPIO_Port GPIOB
 #define SPARE_Pin GPIO_PIN_15
 #define SPARE_GPIO_Port GPIOB
+#define DATA_READY_Pin GPIO_PIN_15
+#define DATA_READY_GPIO_Port GPIOA
 
 /* USER CODE BEGIN Private defines */
 
