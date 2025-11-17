@@ -29,8 +29,8 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 #define CHANNELS 2
-#define READY_MASK 0x03
 #define VREF 3.3
+#define READY_MASK 0x03
 
 typedef struct __attribute__((packed))
 {
