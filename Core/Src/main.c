@@ -28,7 +28,7 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 #define CHANNELS 2
-#define READY_MASK 0b00000011
+#define READY_MASK 0x03
 
 typedef struct __attribute__((packed))
 {
@@ -180,9 +180,7 @@ void handleCommand(uint8_t cmd, uint8_t val)
         sendAck(cmd, curr);
         return;
       }
-  }
-  switch (cmd)
-  {
+
     case CMD_PILOT:
       port = PILOT_VALVE_GPIO_Port;
       pin = PILOT_VALVE_Pin;
