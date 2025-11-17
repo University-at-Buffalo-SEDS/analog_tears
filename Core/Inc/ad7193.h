@@ -32,6 +32,7 @@ typedef struct {
   GPIO_TypeDef *interrupt_port;
   uint16_t interrupt_pin;
   float vref;
+  uint32_t gain;
 } AD7193_HandleTypeDef;
 
 /* Exported constants --------------------------------------------------------*/
@@ -137,10 +138,9 @@ typedef struct {
  * @param  vref: Reference voltage in volts
  * @retval HAL status
  */
-HAL_StatusTypeDef AD7193_Init(AD7193_HandleTypeDef *hadc7193,
-                              SPI_HandleTypeDef *hspi, GPIO_TypeDef *cs_port,
-                              uint16_t cs_pin, GPIO_TypeDef *interrupt_port,
-                              uint16_t interrupt_pin, float vref);
+HAL_StatusTypeDef AD7193_Init(AD7193_HandleTypeDef *hadc7193, SPI_HandleTypeDef *hspi,
+                              GPIO_TypeDef *cs_port, uint16_t cs_pin, GPIO_TypeDef *interrupt_port,
+                              uint16_t interrupt_pin, float vref, uint32_t gain);
 
 /**
  * @brief  Reset AD7193
@@ -156,8 +156,7 @@ HAL_StatusTypeDef AD7193_Reset(AD7193_HandleTypeDef *hadc7193);
  * @param  data: 24-bit data to write
  * @retval HAL status
  */
-HAL_StatusTypeDef AD7193_WriteReg(AD7193_HandleTypeDef *hadc7193,
-                                  uint8_t regAddr, uint32_t data);
+HAL_StatusTypeDef AD7193_WriteReg(AD7193_HandleTypeDef *hadc7193, uint8_t regAddr, uint32_t data);
 
 /**
  * @brief  Read 24-bit register
@@ -166,8 +165,7 @@ HAL_StatusTypeDef AD7193_WriteReg(AD7193_HandleTypeDef *hadc7193,
  * @param  data: Pointer to store read data
  * @retval HAL status
  */
-HAL_StatusTypeDef AD7193_ReadReg32(AD7193_HandleTypeDef *hadc7193,
-                                   uint8_t regAddr, uint32_t *data);
+HAL_StatusTypeDef AD7193_ReadReg32(AD7193_HandleTypeDef *hadc7193, uint8_t regAddr, uint32_t *data);
 
 /**
  * @brief  Read 8-bit register
@@ -176,8 +174,7 @@ HAL_StatusTypeDef AD7193_ReadReg32(AD7193_HandleTypeDef *hadc7193,
  * @param  data: Pointer to store read data
  * @retval HAL status
  */
-HAL_StatusTypeDef AD7193_ReadReg8(AD7193_HandleTypeDef *hadc7193,
-                                  uint8_t regAddr, uint8_t *data);
+HAL_StatusTypeDef AD7193_ReadReg8(AD7193_HandleTypeDef *hadc7193, uint8_t regAddr, uint8_t *data);
 
 /**
  * @brief  Read status register
@@ -185,8 +182,7 @@ HAL_StatusTypeDef AD7193_ReadReg8(AD7193_HandleTypeDef *hadc7193,
  * @param  status: Pointer to store status byte
  * @retval HAL status
  */
-HAL_StatusTypeDef AD7193_ReadStatus(AD7193_HandleTypeDef *hadc7193,
-                                    uint8_t *status);
+HAL_StatusTypeDef AD7193_ReadStatus(AD7193_HandleTypeDef *hadc7193, uint8_t *status);
 
 /**
  * @brief  Read data register
@@ -194,8 +190,11 @@ HAL_StatusTypeDef AD7193_ReadStatus(AD7193_HandleTypeDef *hadc7193,
  * @param  data: Pointer to store 24-bit data
  * @retval HAL status
  */
-HAL_StatusTypeDef AD7193_ReadData(AD7193_HandleTypeDef *hadc7193,
-                                  uint32_t *data);
+HAL_StatusTypeDef AD7193_ReadData(AD7193_HandleTypeDef *hadc7193, uint32_t *data);
+
+HAL_StatusTypeDef
+AD7193_ReadData_WithContinuousReadMode_WithCSPinALwaysLowToMakeTheInterruptWork_WithDAT_STAModeSet(
+    AD7193_HandleTypeDef *hadc7193, uint32_t *data, uint8_t *statusRegister);
 
 /**
  * @brief  Convert raw ADC value to voltage (bipolar mode)
@@ -205,10 +204,8 @@ HAL_StatusTypeDef AD7193_ReadData(AD7193_HandleTypeDef *hadc7193,
  * @param  voltage: Pointer to store converted voltage
  * @retval HAL status
  */
-HAL_StatusTypeDef
-AD7193_BipolarModeConvertToVoltage(AD7193_HandleTypeDef *hadc7193,
-                                   uint32_t rawData, uint32_t gain,
-                                   float *voltage);
+HAL_StatusTypeDef AD7193_BipolarModeConvertToVoltage(AD7193_HandleTypeDef *hadc7193,
+                                                     uint32_t rawData, float *voltage);
 
 /**
  * @brief  Configure AD7193 for continuous conversion mode
@@ -217,8 +214,7 @@ AD7193_BipolarModeConvertToVoltage(AD7193_HandleTypeDef *hadc7193,
  * @param  mode: Mode register value
  * @retval HAL status
  */
-HAL_StatusTypeDef AD7193_Configure(AD7193_HandleTypeDef *hadc7193,
-                                   uint32_t config, uint32_t mode);
+HAL_StatusTypeDef AD7193_Configure(AD7193_HandleTypeDef *hadc7193, uint32_t config, uint32_t mode);
 
 /**
  * @brief  Enable continuous read mode (DAT_STA bit set)
@@ -233,6 +229,16 @@ HAL_StatusTypeDef AD7193_EnableContinuousRead(AD7193_HandleTypeDef *hadc7193);
  */
 void AD7193_SetCSlowForTheInterruptToWork(AD7193_HandleTypeDef *hadc7193);
 
+typedef struct {
+  uint8_t channelNum; // Channel number (bits 3-0)
+  bool ready;         // RDY bit (bit 7)
+  bool error;         // ERR bit (bit 6)
+  bool noReference;   // NOREF bit (bit 5)
+  bool parity;        // Parity bit (bit 4)
+} AD7193_StatusRegisterTypeDef;
+
+HAL_StatusTypeDef AD7193_RawStatusRegisterToStruct(uint8_t *rawData,
+                                                   AD7193_StatusRegisterTypeDef *statusStruct);
 #ifdef __cplusplus
 }
 #endif
