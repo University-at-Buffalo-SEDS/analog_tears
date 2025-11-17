@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "ad7193.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -29,6 +30,7 @@
 /* USER CODE BEGIN PTD */
 #define CHANNELS 2
 #define READY_MASK 0b00000011
+#define VREF 3.3
 
 typedef struct __attribute__((packed))
 {
@@ -87,6 +89,8 @@ SPI_HandleTypeDef hspi1;
 UART_HandleTypeDef huart1;
 
 PCD_HandleTypeDef hpcd_USB_FS;
+
+AD7193_HandleTypeDef hadc7193;
 
 /* USER CODE BEGIN PV */
 uint8_t ack_buffer[4];
@@ -253,7 +257,62 @@ void handleIgniterSequence(void)
 
 void ad7193_init()
 {
-  // TODO
+  // Initialize AD7193 driver with configurable pins
+  if (AD7193_Init(&hadc7193, &hspi1, 
+                   ADC_CS_GPIO_Port, ADC_CS_Pin,
+                   DATA_READY_GPIO_Port, DATA_READY_Pin,
+                   VREF) != HAL_OK) {
+    Error_Handler();
+  }
+
+  // Reset AD7193
+  if (AD7193_Reset(&hadc7193) != HAL_OK) {
+    Error_Handler();
+  }
+
+  // Configure AD7193 registers
+  uint32_t config = 
+    AD7193_CONFIG_CHOP(0) |        // CHOP = 0 (chop disabled for faster conversion)
+    AD7193_CONFIG_REFSEL(0) |      // REFSEL = 0 (use REFIN1)
+    AD7193_CONFIG_PSEUDO(0) |      // Pseudo
+    AD7193_CONFIG_SHORT(0) |       // Short 
+    AD7193_CONFIG_TEMP(0) |        // TEMP 
+    AD7193_CONFIG_CH7(0) |         // CH7 
+    AD7193_CONFIG_CH6(0) |         // CH6 
+    AD7193_CONFIG_CH5(0) |         // CH5 
+    AD7193_CONFIG_CH4(0) |         // CH4 
+    AD7193_CONFIG_CH3(1) |         // CH3 
+    AD7193_CONFIG_CH2(1) |         // CH2 
+    AD7193_CONFIG_CH1(0) |         // CH1 
+    AD7193_CONFIG_CH0(0) |         // CH0 (AIN1-AIN2 pair enabled)
+    AD7193_CONFIG_BURN(0) |        // BURN = 0
+    AD7193_CONFIG_REFDET(0) |      // REFDET = 0
+    AD7193_CONFIG_BUF(1) |         // BUF (buffer enabled) // HAS TO BE ENABLED FOR ADC TO WORK
+    AD7193_CONFIG_UB(0) |          // U/B  (When this bit is set, unipolar operation is selected.) // HAS TO BE bipolar FOR ADC TO WORK
+    AD7193_CONFIG_G2(1) |          // G2
+    AD7193_CONFIG_G1(1) |          // G1  
+    AD7193_CONFIG_G0(1);           // G0
+
+  // Configure mode register for continuous conversion
+  uint32_t mode = 
+    AD7193_MODE_MD2(0) |           // MD2 = 0
+    AD7193_MODE_MD1(0) |           // MD1 = 0
+    AD7193_MODE_MD0(0) |           // MD0 = 0 (Continuous conversion mode)
+    AD7193_MODE_DAT_STA(1) |       // DAT_STA = 1
+    AD7193_MODE_CLK1(1) |          // CLK1 = 1
+    AD7193_MODE_CLK0(0) |          // CLK0 = 0 (Internal clock)
+    AD7193_MODE_AVG1(0) |          // AVG1 = 0
+    AD7193_MODE_AVG0(0) |          // AVG0 = 0 (no averaging)
+    AD7193_MODE_SINC3(0) |         // SINC3 = 0 (use SINC4 filter)
+    AD7193_MODE_ENPAR(0) |         // ENPAR = 0
+    AD7193_MODE_CLK_DIV(0) |       // CLK_DIV = 0
+    AD7193_MODE_SINGLE(0) |        // Single = 0
+    AD7193_MODE_REJ60(0) |         // REJ60 = 0
+    AD7193_MODE_FS(48);            // FS[9:0] = 96 (50Hz output rate)
+
+  AD7193_Configure(&hadc7193, config, mode);
+  AD7193_EnableContinuousRead(&hadc7193);
+  AD7193_SetCSlowForTheInterruptToWork(&hadc7193);
 }
 
 /* USER CODE END 0 */
