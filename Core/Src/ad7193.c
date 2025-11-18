@@ -285,4 +285,5 @@ HAL_StatusTypeDef AD7193_RawStatusRegisterToStruct(uint8_t *rawData,
   statusStruct->noReference = (*rawData >> 5) & 0x01;
   statusStruct->parity = (*rawData >> 4) & 0x01;
   statusStruct->channelNum = *rawData & 0x0F;
+  return HAL_OK;
 }

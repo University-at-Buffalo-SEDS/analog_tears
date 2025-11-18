@@ -42,8 +42,9 @@ typedef struct {
 #define AD7193_MODE_REG_ADDR 0x01
 #define AD7193_CONFIG_REG_ADDR 0x02
 #define AD7193_DATA_REG_ADDR 0x03
-
-// Status register bits
+typedef unsigned char bool;
+#define true 1
+#define false 0
 #define AD7193_STATUS_RDY (1 << 7) // RDY bit (inverted: 0 = ready)
 
 // Configuration register bit masks

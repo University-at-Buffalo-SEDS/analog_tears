@@ -125,8 +125,9 @@ uint8_t computeCRC(uint8_t *data, uint8_t len) {
   return crc;
 }
 
-uint16_t computeCRC_16(const uint8_t *data, uint16_t len) {
+uint16_t computeCRC_16(const uint8_t * restrict data, uint16_t len) {
   // TODO
+  return -1;
 }
 
 void sendAck(uint8_t cmd, GPIO_PinState state) {
