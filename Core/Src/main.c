@@ -67,6 +67,7 @@ typedef enum { IGNITER_IDLE, IGNITER_FIRING, IGNITER_PILOT, IGNITER_COMPLETE } i
 
 #define PILOT_VALVE_DELAY 5000
 #define IGNITER_TURN_OFF 10000
+#define UART_ACK_TIMEOUT 2000
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -125,20 +126,44 @@ uint8_t computeCRC(uint8_t *data, uint8_t len) {
   return crc;
 }
 
-uint16_t computeCRC_16(const uint8_t * restrict data, uint16_t len) {
-  // TODO
-  return -1;
+uint16_t computeCRC_16(const uint8_t *data, uint16_t len) {
+  uint16_t crc = 0xFFFF;
+
+  for (uint16_t i = 0; i < len; i++) {
+    // XOR byte into the top of the CRC
+    crc ^= (uint16_t)data[i] << 8;
+
+    // Process 8 bits
+    for (uint8_t j = 0; j < 8; j++) {
+      if (crc & 0x8000) // If MSB is 1
+      {
+        crc = (crc << 1) ^ 0x1021;
+      } else {
+        crc = crc << 1;
+      }
+    }
+  }
+  return crc;
 }
 
 void sendAck(uint8_t cmd, GPIO_PinState state) {
-  while (uart_busy)
-    ;
+  uint32_t timeout = UART_ACK_TIMEOUT;
+
+  while (uart_busy && timeout > 0) {
+    timeout--;
+  }
+  if (timeout == 0) {
+    return;
+  }
+
   uart_busy = 1;
   ack_buffer[0] = ACK_HEADER;
   ack_buffer[1] = cmd;
   ack_buffer[2] = (state == GPIO_PIN_SET) ? 1 : 0;
   ack_buffer[3] = computeCRC(ack_buffer, 3);
-  HAL_UART_Transmit_IT(&huart1, ack_buffer, 4);
+  if (HAL_UART_Transmit_IT(&huart1, ack_buffer, 4) != HAL_OK) {
+    uart_busy = 0;
+  }
 }
 
 volatile igniterState_t state = IGNITER_IDLE;
