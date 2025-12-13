@@ -15,7 +15,9 @@ static void AD7193_SPI_Start(AD7193_HandleTypeDef *hadc7193) {
  * @brief  End SPI transaction (CS HIGH)
  */
 static void AD7193_SPI_End(AD7193_HandleTypeDef *hadc7193) {
-  HAL_GPIO_WritePin(hadc7193->cs_port, hadc7193->cs_pin, GPIO_PIN_SET);
+  // HAL_GPIO_WritePin(hadc7193->cs_port, hadc7193->cs_pin, GPIO_PIN_SET);
+  // The CS has to be kept LOW at all times for the continuos-read to work. Idk why calling AD7193_SetCSlowForTheInterruptToWork 
+  // doesn't do the trick, but commenting this out fixes it, so might as well use it.
 }
 
 /**
@@ -262,6 +264,8 @@ HAL_StatusTypeDef AD7193_EnableContinuousRead(AD7193_HandleTypeDef *hadc7193) {
   HAL_StatusTypeDef status = HAL_SPI_Transmit(hadc7193->hspi, &comm_byte, 1, AD7193_SPI_TIMEOUT);
   AD7193_SPI_End(hadc7193);
 
+  HAL_Delay(100);
+
   return status;
 }
 
@@ -271,6 +275,8 @@ HAL_StatusTypeDef AD7193_EnableContinuousRead(AD7193_HandleTypeDef *hadc7193) {
  */
 void AD7193_SetCSlowForTheInterruptToWork(AD7193_HandleTypeDef *hadc7193) {
   HAL_GPIO_WritePin(hadc7193->cs_port, hadc7193->cs_pin, GPIO_PIN_RESET);
+
+  HAL_Delay(100);
 }
 
 HAL_StatusTypeDef AD7193_RawStatusRegisterToStruct(uint8_t *rawData,

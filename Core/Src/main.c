@@ -378,14 +378,10 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, 1);
-    HAL_Delay(100);
-    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, 0);
-    HAL_Delay(100);
-
-
-    printf("Hello from STM32F103!\n");
-    printf("ad7193_ready: %d\r\n", ad7193_ready);
+    // HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, 1);
+    // HAL_Delay(100);
+    // HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, 0);
+    // HAL_Delay(100);
 
     // handleIgniterSequence();
     // if (cmd_rdy) {
@@ -397,42 +393,58 @@ int main(void)
     //   __enable_irq();
     //   handleCommand(cmd, val);
     // }
-    // if (ad7193_ready) {
-    //   ad7193_ready = 0;
 
-    //   uint32_t dataReg = 0;
-    //   uint8_t statusReg = 0;
 
-    //   if (AD7193_ReadData_WithContinuousReadMode_WithCSPinALwaysLowToMakeTheInterruptWork_WithDAT_STAModeSet(
-    //           &hadc7193, &dataReg, &statusReg) != HAL_OK) {
-    //     // TODO: HANDLE ERROR
-    //   }
+    if (ad7193_ready) {
+      ad7193_ready = 0;
+      uint32_t dataReg = 0;
+      uint8_t statusReg = 0;
 
-    //   // I guess that ad7193_buffer stores the raw bytes and then we want to do the conversion on
-    //   // the receiving end? We send raw data. float voltage = 0; if
-    //   // (AD7193_BipolarModeConvertToVoltage(&hadc7193, dataReg, &voltage) != HAL_OK) {
-    //   //   // TODO: HANDLE ERROR
-    //   // }
+      HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
+      if (AD7193_ReadData_WithContinuousReadMode_WithCSPinALwaysLowToMakeTheInterruptWork_WithDAT_STAModeSet(
+              &hadc7193, &dataReg, &statusReg) != HAL_OK) {
+        // TODO: HANDLE ERROR
+      }
+      HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
-    //   AD7193_StatusRegisterTypeDef statusRegStruct;
-    //   if (AD7193_RawStatusRegisterToStruct(&statusReg, &statusRegStruct) != HAL_OK) {
-    //     // TODO: HANDLE ERROR
-    //   }
+      // I guess that ad7193_buffer stores the raw bytes and then we want to do the conversion on
+      // the receiving end? We send raw data. float voltage = 0; if
+      float voltage = 0;
+      if (AD7193_BipolarModeConvertToVoltage(&hadc7193, dataReg, &voltage) != HAL_OK) {
+        // TODO: HANDLE ERROR
+      }
 
-    //   ad7193_buffer[statusRegStruct.channelNum] = dataReg;
-    //   fresh_mask |= 1 << statusRegStruct.channelNum;
+      AD7193_StatusRegisterTypeDef statusRegStruct;
+      if (AD7193_RawStatusRegisterToStruct(&statusReg, &statusRegStruct) != HAL_OK) {
+        // TODO: HANDLE ERROR
+      }
 
-    //   /**
-    //   1. Read over SPI when interrupt is triggered // DONE
-    //   2. Identify channel -> curr_channel // DONE
-    //   3. Store three bytes in ad7193_buffer[curr_channel] // DONE
-    //   4. Update fresh_mask for the current channel (fresh_mask |= 1 << curr_channel) // DONE
-    //   5. Check if fresh_mask == READY_MASK
-    //      a. Collect internal ADC data from DMA buffer
-    //      b. Send packet over non-blocking call
-    //      c. Reset fresh_mask flag
-    //   */
-    // }
+      // printf("AD7193 Data Register: 0x%06lX (%lu)\r\n", dataReg, dataReg);
+      // printf("AD7193 Status Register: 0x%02X (%u)\r\n", statusReg, statusReg);
+
+      int voltage_mV = (int)(voltage * 100000);
+      if (statusRegStruct.channelNum == 2) {
+        printf("A:%d.0\n", voltage_mV);
+      } 
+      
+      if (statusRegStruct.channelNum == 3) {
+        printf("B:%d.0\n", voltage_mV);
+      }
+
+      // ad7193_buffer[statusRegStruct.channelNum] = dataReg;
+      // fresh_mask |= 1 << statusRegStruct.channelNum;
+
+      /**
+      1. Read over SPI when interrupt is triggered // DONE
+      2. Identify channel -> curr_channel // DONE
+      3. Store three bytes in ad7193_buffer[curr_channel] // DONE
+      4. Update fresh_mask for the current channel (fresh_mask |= 1 << curr_channel) // DONE
+      5. Check if fresh_mask == READY_MASK
+         a. Collect internal ADC data from DMA buffer
+         b. Send packet over non-blocking call
+         c. Reset fresh_mask flag
+      */
+    }
   }
   /* USER CODE END 3 */
 }
@@ -680,6 +692,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 1, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
@@ -707,7 +723,6 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
-  printf("interrupt triggered!\r\n");
   if (GPIO_Pin == DATA_READY_Pin) {
     ad7193_ready = 1;
   }
