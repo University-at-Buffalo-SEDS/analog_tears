@@ -272,10 +272,10 @@ void ad7193_init() {
       AD7193_CONFIG_CH6(0) |    // CH6
       AD7193_CONFIG_CH5(0) |    // CH5
       AD7193_CONFIG_CH4(0) |    // CH4
-      AD7193_CONFIG_CH3(1) |    // CH3
-      AD7193_CONFIG_CH2(1) |    // CH2
-      AD7193_CONFIG_CH1(0) |    // CH1
-      AD7193_CONFIG_CH0(0) |    // CH0 (AIN1-AIN2 pair enabled)
+      AD7193_CONFIG_CH3(0) |    // CH3
+      AD7193_CONFIG_CH2(0) |    // CH2
+      AD7193_CONFIG_CH1(1) |    // CH1
+      AD7193_CONFIG_CH0(1) |    // CH0 (AIN1-AIN2 pair enabled)
       AD7193_CONFIG_BURN(0) |   // BURN = 0
       AD7193_CONFIG_REFDET(0) | // REFDET = 0
       AD7193_CONFIG_BUF(1) |    // BUF (buffer enabled) // HAS TO BE ENABLED FOR ADC TO WORK
@@ -422,14 +422,16 @@ int main(void)
       // printf("AD7193 Data Register: 0x%06lX (%lu)\r\n", dataReg, dataReg);
       // printf("AD7193 Status Register: 0x%02X (%u)\r\n", statusReg, statusReg);
 
-      int voltage_mV = (int)(voltage * 100000);
-      if (statusRegStruct.channelNum == 2) {
-        printf("A:%d.0\n", voltage_mV);
+      int voltage_mV = (int)(voltage * 1000000000000);
+      // printf("%d\n", statusRegStruct.channelNum);
+      if (statusRegStruct.channelNum == 0) {
+        printf("A:%d\n", -voltage_mV);
       } 
-      
-      if (statusRegStruct.channelNum == 3) {
-        printf("B:%d.0\n", voltage_mV);
+
+      if (statusRegStruct.channelNum == 1) {
+        printf("B:%d\n", -voltage_mV);
       }
+      
 
       // ad7193_buffer[statusRegStruct.channelNum] = dataReg;
       // fresh_mask |= 1 << statusRegStruct.channelNum;
