@@ -19,13 +19,14 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "usb_device.h"
-
+#include "usbd_cdc_if.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <stddef.h>
 #include "ad7193.h"
 /* USER CODE END Includes */
 
@@ -39,7 +40,7 @@ typedef struct __attribute__((packed)) {
   uint8_t header;                   // 0xAC
   uint8_t sequence;                 // Rolling counter
   uint32_t timestamp;               // HAL_GetTick()
-  uint8_t ad7193_data[CHANNELS][3]; // 24-bit channel (MSB first)
+  float ad7193_data[CHANNELS];      // floating point values for AD7193
   uint16_t stm32_adc;               // 16-bit internal ADC
   uint16_t crc;                     // CRC-16
 } DataPacket_t;
@@ -89,7 +90,6 @@ UART_HandleTypeDef huart1;
 AD7193_HandleTypeDef hadc7193;
 
 uint8_t ack_buffer[4];
-volatile uint8_t uart_busy = 0;
 
 volatile uint8_t cmd_rdy = 0;
 uint8_t cmd_buf[UART_BUFFER_LEN];
@@ -99,7 +99,10 @@ volatile uint16_t internal_adc_buffer[1];
 uint8_t fresh_mask = 0;
 uint8_t sequence = 0;
 uint32_t ad7193_buffer[CHANNELS];
-DataPacket_t data_packet;
+DataPacket_t pkt_buf[2];
+static volatile uint8_t pkt_idx = 0;       // which buffer to build next
+static volatile uint32_t dropped_pkts = 0; // optional debug
+static volatile uint8_t uart_tx_busy = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -146,22 +149,44 @@ uint16_t computeCRC_16(const uint8_t *data, uint16_t len) {
 }
 
 void sendAck(uint8_t cmd, GPIO_PinState state) {
-  uint32_t timeout = UART_ACK_TIMEOUT;
-
-  while (uart_busy && timeout > 0) {
-    timeout--;
-  }
-  if (timeout == 0) {
-    return;
-  }
-
-  uart_busy = 1;
+  if (uart_tx_busy) return;
+  uart_tx_busy = 1;
   ack_buffer[0] = ACK_HEADER;
   ack_buffer[1] = cmd;
   ack_buffer[2] = (state == GPIO_PIN_SET) ? 1 : 0;
   ack_buffer[3] = computeCRC(ack_buffer, 3);
   if (HAL_UART_Transmit_IT(&huart1, ack_buffer, 4) != HAL_OK) {
-    uart_busy = 0;
+    uart_tx_busy = 0;
+  }
+}
+
+static inline void TrySendDataPacket_IT(const float ad_volts[CHANNELS],
+                                       uint16_t stm32_adc_sample) {
+  if (uart_tx_busy) {
+    dropped_pkts++;
+    return; // simplest policy: drop if UART is busy
+  }
+
+  uart_tx_busy = 1;
+
+  // Pick buffer and flip for next time
+  DataPacket_t *p = &pkt_buf[pkt_idx];
+  pkt_idx ^= 1;
+
+  // Fill packet
+  p->header    = DATA_HEADER;      // 0xAC
+  p->sequence  = sequence++;
+  p->timestamp = HAL_GetTick();
+  for (int i = 0; i < CHANNELS; i++) {
+    p->ad7193_data[i] = ad_volts[i];
+  }
+  p->stm32_adc = stm32_adc_sample;
+
+  p->crc = computeCRC_16((const uint8_t*)p, (uint16_t)offsetof(DataPacket_t, crc));
+
+  // Start non-blocking TX
+  if (HAL_UART_Transmit_IT(&huart1, (uint8_t*)p, (uint16_t)sizeof(DataPacket_t)) != HAL_OK) {
+    uart_tx_busy = 0; // give up
   }
 }
 
@@ -293,8 +318,8 @@ void ad7193_init() {
       AD7193_MODE_MD0(0) |     // MD0 = 0 (Continuous conversion mode)
       AD7193_MODE_DAT_STA(1) | // DAT_STA = 1 This bit enables the transmission of status register
                                // contents after each data register read.
-      AD7193_MODE_CLK1(1) |    // CLK1 = 1
-      AD7193_MODE_CLK0(0) |    // CLK0 = 0 (Internal clock)
+      AD7193_MODE_CLK1(0) |    // CLK1
+      AD7193_MODE_CLK0(0) |    // CLK0
       AD7193_MODE_AVG1(0) |    // AVG1 = 0
       AD7193_MODE_AVG0(0) |    // AVG0 = 0 (no averaging)
       AD7193_MODE_SINC3(0) |   // SINC3 = 0 (use SINC4 filter)
@@ -366,14 +391,15 @@ int main(void)
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
   ad7193_init();
-  // HAL_UART_Receive_IT(&huart1, uart_rx_buf, UART_BUFFER_LEN);
-  // HAL_ADC_Start_DMA(&hadc1, (uint32_t *)internal_adc_buffer, 1);
+  HAL_UART_Receive_IT(&huart1, uart_rx_buf, UART_BUFFER_LEN);
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)internal_adc_buffer, 1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  while (1) {
+  while (1) 
+  {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -383,55 +409,90 @@ int main(void)
     // HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, 0);
     // HAL_Delay(100);
 
-    // handleIgniterSequence();
-    // if (cmd_rdy) {
-    //   // atomic clear
-    //   __disable_irq();
-    //   cmd_rdy = 0;
-    //   uint8_t cmd = cmd_buf[1];
-    //   uint8_t val = cmd_buf[2];
-    //   __enable_irq();
-    //   handleCommand(cmd, val);
-    // }
+    handleIgniterSequence();
+    if (cmd_rdy) {
+      // atomic clear
+      __disable_irq();
+      cmd_rdy = 0;
+      uint8_t cmd = cmd_buf[1];
+      uint8_t val = cmd_buf[2];
+      __enable_irq();
+      handleCommand(cmd, val);
+    }
 
-
-    if (ad7193_ready) {
+    if (ad7193_ready) 
+    {
       ad7193_ready = 0;
       uint32_t dataReg = 0;
       uint8_t statusReg = 0;
 
+      // HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
+      // if (AD7193_ReadData_WithContinuousReadMode_WithCSPinALwaysLowToMakeTheInterruptWork_WithDAT_STAModeSet(
+      //         &hadc7193, &dataReg, &statusReg) != HAL_OK) {
+      //   // TODO: HANDLE ERROR
+      // }
+      // HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
+      // // I guess that ad7193_buffer stores the raw bytes and then we want to do the conversion on
+      // // the receiving end? We send raw data. float voltage = 0; if
+      // float voltage = 0;
+      // if (AD7193_BipolarModeConvertToVoltage(&hadc7193, dataReg, &voltage) != HAL_OK) {
+      //   // TODO: HANDLE ERROR
+      // }
+
+      // AD7193_StatusRegisterTypeDef statusRegStruct;
+      // if (AD7193_RawStatusRegisterToStruct(&statusReg, &statusRegStruct) != HAL_OK) {
+      //   // TODO: HANDLE ERROR
+      // }
+
+      // // printf("AD7193 Data Register: 0x%06lX (%lu)\r\n", dataReg, dataReg);
+      // // printf("AD7193 Status Register: 0x%02X (%u)\r\n", statusReg, statusReg);
+
+      // int voltage_mV = (int)(voltage * 1000000000000);
+      // // printf("%d\n", statusRegStruct.channelNum);
+      // if (statusRegStruct.channelNum == 0) {
+      //   printf("A:%d\n", -voltage_mV);
+      // } 
+
+      // if (statusRegStruct.channelNum == 1) {
+      //   printf("B:%d\n", -voltage_mV);
+      // }
+      
       HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
-      if (AD7193_ReadData_WithContinuousReadMode_WithCSPinALwaysLowToMakeTheInterruptWork_WithDAT_STAModeSet(
-              &hadc7193, &dataReg, &statusReg) != HAL_OK) {
-        // TODO: HANDLE ERROR
-      }
+      (void)AD7193_ReadData_WithContinuousReadMode_WithCSPinALwaysLowToMakeTheInterruptWork_WithDAT_STAModeSet
+      (
+        &hadc7193, &dataReg, &statusReg
+      );
       HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
-      // I guess that ad7193_buffer stores the raw bytes and then we want to do the conversion on
-      // the receiving end? We send raw data. float voltage = 0; if
-      float voltage = 0;
-      if (AD7193_BipolarModeConvertToVoltage(&hadc7193, dataReg, &voltage) != HAL_OK) {
-        // TODO: HANDLE ERROR
-      }
-
       AD7193_StatusRegisterTypeDef statusRegStruct;
-      if (AD7193_RawStatusRegisterToStruct(&statusReg, &statusRegStruct) != HAL_OK) {
-        // TODO: HANDLE ERROR
+      (void)AD7193_RawStatusRegisterToStruct
+      (
+        &statusReg, &statusRegStruct
+      );
+
+      uint8_t ch = (uint8_t)statusRegStruct.channelNum;
+      if (ch < CHANNELS) 
+      {
+        ad7193_buffer[ch] = dataReg;
+        fresh_mask |= (uint8_t)(1u << ch);
       }
 
-      // printf("AD7193 Data Register: 0x%06lX (%lu)\r\n", dataReg, dataReg);
-      // printf("AD7193 Status Register: 0x%02X (%u)\r\n", statusReg, statusReg);
+      if (fresh_mask == READY_MASK) 
+      {
+        fresh_mask = 0;
 
-      int voltage_mV = (int)(voltage * 1000000000000);
-      // printf("%d\n", statusRegStruct.channelNum);
-      if (statusRegStruct.channelNum == 0) {
-        printf("A:%d\n", -voltage_mV);
-      } 
+        float volts[CHANNELS] = {0};
+        for (int i = 0; i < CHANNELS; i++) 
+        {
+          (void)AD7193_BipolarModeConvertToVoltage
+          (
+            &hadc7193, ad7193_buffer[i], &volts[i]
+          );
+        }
 
-      if (statusRegStruct.channelNum == 1) {
-        printf("B:%d\n", -voltage_mV);
+        TrySendDataPacket_IT(volts, internal_adc_buffer[0]);
       }
-      
 
       // ad7193_buffer[statusRegStruct.channelNum] = dataReg;
       // fresh_mask |= 1 << statusRegStruct.channelNum;
@@ -599,7 +660,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 57600;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -720,7 +781,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
   if (huart->Instance == USART1) {
-    uart_busy = 0;
+    uart_tx_busy = 0;
   }
 }
 

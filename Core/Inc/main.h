@@ -59,9 +59,9 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define ADC_CS_Pin GPIO_PIN_4
 #define ADC_CS_GPIO_Port GPIOA
-#define PILOT_VALVE_Pin GPIO_PIN_0
+#define PILOT_VALVE_Pin GPIO_PIN_3
 #define PILOT_VALVE_GPIO_Port GPIOB
-#define TANKS_Pin GPIO_PIN_1
+#define TANKS_Pin GPIO_PIN_4
 #define TANKS_GPIO_Port GPIOB
 #define IGINITER_Pin GPIO_PIN_14
 #define IGINITER_GPIO_Port GPIOB
