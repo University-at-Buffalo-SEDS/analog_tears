@@ -178,7 +178,7 @@ static inline void TrySendDataPacket_IT(const float ad_volts[CHANNELS],
   p->sequence  = sequence++;
   p->timestamp = HAL_GetTick();
   for (int i = 0; i < CHANNELS; i++) {
-    p->ad7193_data[i] = ad_volts[i];
+    p->ad7193_data[i] = -ad_volts[i];
   }
   p->stm32_adc = stm32_adc_sample;
 
