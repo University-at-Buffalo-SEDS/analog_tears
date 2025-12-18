@@ -45,7 +45,7 @@ typedef struct __attribute__((packed)) {
   uint16_t crc;                     // CRC-16
 } DataPacket_t;
 
-typedef enum { IGNITER_IDLE, IGNITER_FIRING, IGNITER_PILOT, IGNITER_COMPLETE } igniterState_t;
+typedef enum { IGNITER_IDLE, IGNITER_FIRING, IGNITER_PILOT, IGNITER_PILOT_OFF, IGNITER_COMPLETE } igniterState_t;
 
 /* USER CODE END PTD */
 
@@ -58,6 +58,7 @@ typedef enum { IGNITER_IDLE, IGNITER_FIRING, IGNITER_PILOT, IGNITER_COMPLETE } i
 #define CMD_SPARE 'S'
 #define CMD_TANKS 'T'
 #define CMD_PILOT 'P'
+#define PILOT_ON_DURATION_MS 1500
 
 #define CMD_ON 0x01
 #define CMD_OFF 0x02
@@ -103,6 +104,8 @@ DataPacket_t pkt_buf[2];
 static volatile uint8_t pkt_idx = 0;       // which buffer to build next
 static volatile uint32_t dropped_pkts = 0; // optional debug
 static volatile uint8_t uart_tx_busy = 0;
+volatile uint32_t pilot_start = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -257,32 +260,46 @@ void handleCommand(uint8_t cmd, uint8_t val) {
 }
 
 void handleIgniterSequence(void) {
-  uint32_t elapsed;
+  uint32_t now = HAL_GetTick();
 
   switch (state) {
   case IGNITER_IDLE:
     break;
+
   case IGNITER_FIRING:
-    elapsed = HAL_GetTick() - igniter_start;
-    if (elapsed >= PILOT_VALVE_DELAY) {
+    if ((now - igniter_start) >= PILOT_VALVE_DELAY) {
       HAL_GPIO_WritePin(PILOT_VALVE_GPIO_Port, PILOT_VALVE_Pin, GPIO_PIN_SET);
       sendAck(CMD_PILOT, GPIO_PIN_SET);
+
+      pilot_start = now;          // start pilot-on timer
       state = IGNITER_PILOT;
     }
     break;
+
   case IGNITER_PILOT:
-    elapsed = HAL_GetTick() - igniter_start;
-    if (elapsed > IGNITER_TURN_OFF) {
+    // turn pilot off after 1.5 seconds
+    if ((now - pilot_start) >= PILOT_ON_DURATION_MS) {
+      HAL_GPIO_WritePin(PILOT_VALVE_GPIO_Port, PILOT_VALVE_Pin, GPIO_PIN_RESET);
+      sendAck(CMD_PILOT, GPIO_PIN_RESET);
+      state = IGNITER_PILOT_OFF;
+    }
+    break;
+
+  case IGNITER_PILOT_OFF:
+    // keep existing igniter turn-off timing (based on igniter_start)
+    if ((now - igniter_start) > IGNITER_TURN_OFF) {
       HAL_GPIO_WritePin(IGINITER_GPIO_Port, IGINITER_Pin, GPIO_PIN_RESET);
       sendAck(CMD_IGNITER, GPIO_PIN_RESET);
       state = IGNITER_COMPLETE;
     }
     break;
+
   case IGNITER_COMPLETE:
     state = IGNITER_IDLE;
     break;
   }
 }
+
 
 void ad7193_init() {
 
