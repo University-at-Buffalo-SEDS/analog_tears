@@ -1,21 +1,21 @@
 /* USER CODE BEGIN Header */
 /**
-  ******************************************************************************
-  * @file           : main.h
-  * @brief          : Header for main.c file.
-  *                   This file contains the common defines of the application.
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2025 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+ ******************************************************************************
+ * @file           : main.h
+ * @brief          : Header for main.c file.
+ *                   This file contains the common defines of the application.
+ ******************************************************************************
+ * @attention
+ *
+ * Copyright (c) 2025 STMicroelectronics.
+ * All rights reserved.
+ *
+ * This software is licensed under terms that can be found in the LICENSE file
+ * in the root directory of this software component.
+ * If no LICENSE file comes with this software, it is provided AS-IS.
+ *
+ ******************************************************************************
+ */
 /* USER CODE END Header */
 
 /* Define to prevent recursive inclusion -------------------------------------*/
@@ -59,9 +59,9 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define ADC_CS_Pin GPIO_PIN_4
 #define ADC_CS_GPIO_Port GPIOA
-#define PILOT_VALVE_Pin GPIO_PIN_0
+#define PILOT_VALVE_Pin GPIO_PIN_3
 #define PILOT_VALVE_GPIO_Port GPIOB
-#define TANKS_Pin GPIO_PIN_1
+#define TANKS_Pin GPIO_PIN_4
 #define TANKS_GPIO_Port GPIOB
 #define IGINITER_Pin GPIO_PIN_14
 #define IGINITER_GPIO_Port GPIOB
@@ -69,6 +69,7 @@ void Error_Handler(void);
 #define SPARE_GPIO_Port GPIOB
 #define DATA_READY_Pin GPIO_PIN_15
 #define DATA_READY_GPIO_Port GPIOA
+#define DATA_READY_EXTI_IRQn EXTI15_10_IRQn
 
 /* USER CODE BEGIN Private defines */
 

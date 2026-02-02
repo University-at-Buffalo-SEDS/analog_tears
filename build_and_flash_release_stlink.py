@@ -33,18 +33,22 @@ def main():
     # 1) Run build_release.main()
     import_and_run_build()
 
-    # 2) Flash binary
+    # 2) Flash binary using ST-Link
     bin_path = Path("build/Release_Script/analog_tears.bin")
     if not bin_path.exists():
         sys.exit(f"Error: binary not found at {bin_path}")
 
+    # Use st-flash to flash the binary
+    # Format: st-flash write <file.bin> <address>
+    # Address 0x08000000 is the standard STM32 flash start address
     run([
-        "dfu-util",
-        "-a", "0",
-        "-s", "0x08000000",
-        "-D", str(bin_path),
+        "st-flash",
+        "write",
+        str(bin_path),
+        "0x08000000",
     ])
 
 
 if __name__ == "__main__":
     main()
+

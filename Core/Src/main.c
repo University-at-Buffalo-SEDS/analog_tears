@@ -1,52 +1,51 @@
 /* USER CODE BEGIN Header */
 /**
-  ******************************************************************************
-  * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2025 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+ ******************************************************************************
+ * @file           : main.c
+ * @brief          : Main program body
+ ******************************************************************************
+ * @attention
+ *
+ * Copyright (c) 2025 STMicroelectronics.
+ * All rights reserved.
+ *
+ * This software is licensed under terms that can be found in the LICENSE file
+ * in the root directory of this software component.
+ * If no LICENSE file comes with this software, it is provided AS-IS.
+ *
+ ******************************************************************************
+ */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-
+#include "usb_device.h"
+#include "usbd_cdc_if.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <stddef.h>
+#include "ad7193.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 #define CHANNELS 2
+#define VREF 3.3
 #define READY_MASK 0x03
 
-typedef struct __attribute__((packed))
-{
-    uint8_t  header;        // 0xAC
-    uint8_t  sequence;      // Rolling counter
-    uint32_t timestamp;     // HAL_GetTick()
-    uint8_t  ad7193_data[CHANNELS][3]; // 24-bit channel (MSB first)
-    uint16_t stm32_adc;     // 16-bit internal ADC
-    uint16_t crc;           // CRC-16
+typedef struct __attribute__((packed)) {
+  uint8_t header;                   // 0xAC
+  uint8_t sequence;                 // Rolling counter
+  uint32_t timestamp;               // HAL_GetTick()
+  float ad7193_data[CHANNELS];      // floating point values for AD7193
+  uint16_t stm32_adc;               // 16-bit internal ADC
+  uint16_t crc;                     // CRC-16
 } DataPacket_t;
 
-typedef enum
-{
-  IGNITER_IDLE,
-  IGNITER_FIRING,
-  IGNITER_PILOT,
-  IGNITER_COMPLETE
-} igniterState_t;
+typedef enum { IGNITER_IDLE, IGNITER_FIRING, IGNITER_PILOT, IGNITER_PILOT_OFF, IGNITER_COMPLETE } igniterState_t;
 
 /* USER CODE END PTD */
 
@@ -59,6 +58,7 @@ typedef enum
 #define CMD_SPARE 'S'
 #define CMD_TANKS 'T'
 #define CMD_PILOT 'P'
+#define PILOT_ON_DURATION_MS 1500
 
 #define CMD_ON 0x01
 #define CMD_OFF 0x02
@@ -71,6 +71,7 @@ typedef enum
 
 #define PILOT_VALVE_DELAY 5000
 #define IGNITER_TURN_OFF 10000
+#define UART_ACK_TIMEOUT 2000
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -86,11 +87,10 @@ SPI_HandleTypeDef hspi1;
 
 UART_HandleTypeDef huart1;
 
-PCD_HandleTypeDef hpcd_USB_FS;
-
 /* USER CODE BEGIN PV */
+AD7193_HandleTypeDef hadc7193;
+
 uint8_t ack_buffer[4];
-volatile uint8_t uart_busy = 0;
 
 volatile uint8_t cmd_rdy = 0;
 uint8_t cmd_buf[UART_BUFFER_LEN];
@@ -99,8 +99,13 @@ volatile uint8_t ad7193_ready = 0;
 volatile uint16_t internal_adc_buffer[1];
 uint8_t fresh_mask = 0;
 uint8_t sequence = 0;
-uint8_t ad7193_buffer[CHANNELS][3];
-DataPacket_t data_packet;
+uint32_t ad7193_buffer[CHANNELS];
+DataPacket_t pkt_buf[2];
+static volatile uint8_t pkt_idx = 0;       // which buffer to build next
+static volatile uint32_t dropped_pkts = 0; // optional debug
+static volatile uint8_t uart_tx_busy = 0;
+volatile uint32_t pilot_start = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -109,7 +114,6 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
-static void MX_USB_PCD_Init(void);
 static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 
@@ -119,139 +123,251 @@ static void MX_ADC1_Init(void);
 /* USER CODE BEGIN 0 */
 uint8_t uart_rx_buf[UART_BUFFER_LEN];
 
-uint8_t computeCRC(uint8_t *data, uint8_t len)
-{
+uint8_t computeCRC(uint8_t *data, uint8_t len) {
   uint8_t crc = 0;
-  for (int i = 0; i < len; i++)
-  {
+  for (int i = 0; i < len; i++) {
     crc ^= data[i];
   }
   return crc;
 }
 
-uint16_t computeCRC_16(const uint8_t *data, uint16_t len)
-{
-  // TODO
+uint16_t computeCRC_16(const uint8_t *data, uint16_t len) {
+  uint16_t crc = 0xFFFF;
+
+  for (uint16_t i = 0; i < len; i++) {
+    // XOR byte into the top of the CRC
+    crc ^= (uint16_t)data[i] << 8;
+
+    // Process 8 bits
+    for (uint8_t j = 0; j < 8; j++) {
+      if (crc & 0x8000) // If MSB is 1
+      {
+        crc = (crc << 1) ^ 0x1021;
+      } else {
+        crc = crc << 1;
+      }
+    }
+  }
+  return crc;
 }
 
-void sendAck(uint8_t cmd, GPIO_PinState state)
-{
-    while (uart_busy);
-    uart_busy = 1;
-    ack_buffer[0] = ACK_HEADER;
-    ack_buffer[1] = cmd;
-    ack_buffer[2] = (state == GPIO_PIN_SET) ? 1 : 0;
-    ack_buffer[3] = computeCRC(ack_buffer, 3);
-    HAL_UART_Transmit_IT(&huart1, ack_buffer, 4);
+void sendAck(uint8_t cmd, GPIO_PinState state) {
+  if (uart_tx_busy) return;
+  uart_tx_busy = 1;
+  ack_buffer[0] = ACK_HEADER;
+  ack_buffer[1] = cmd;
+  ack_buffer[2] = (state == GPIO_PIN_SET) ? 1 : 0;
+  ack_buffer[3] = computeCRC(ack_buffer, 3);
+  if (HAL_UART_Transmit_IT(&huart1, ack_buffer, 4) != HAL_OK) {
+    uart_tx_busy = 0;
+  }
+}
+
+static inline void TrySendDataPacket_IT(const float ad_volts[CHANNELS],
+                                       uint16_t stm32_adc_sample) {
+  if (uart_tx_busy) {
+    dropped_pkts++;
+    return; // simplest policy: drop if UART is busy
+  }
+
+  uart_tx_busy = 1;
+
+  // Pick buffer and flip for next time
+  DataPacket_t *p = &pkt_buf[pkt_idx];
+  pkt_idx ^= 1;
+
+  // Fill packet
+  p->header    = DATA_HEADER;      // 0xAC
+  p->sequence  = sequence++;
+  p->timestamp = HAL_GetTick();
+  for (int i = 0; i < CHANNELS; i++) {
+    p->ad7193_data[i] = -ad_volts[i];
+  }
+  p->stm32_adc = stm32_adc_sample;
+
+  p->crc = computeCRC_16((const uint8_t*)p, (uint16_t)offsetof(DataPacket_t, crc));
+
+  // Start non-blocking TX
+  if (HAL_UART_Transmit_IT(&huart1, (uint8_t*)p, (uint16_t)sizeof(DataPacket_t)) != HAL_OK) {
+    uart_tx_busy = 0; // give up
+  }
 }
 
 volatile igniterState_t state = IGNITER_IDLE;
 volatile uint32_t igniter_start = 0;
 
-void handleCommand(uint8_t cmd, uint8_t val)
-{
+void handleCommand(uint8_t cmd, uint8_t val) {
   GPIO_TypeDef *port = NULL;
   uint16_t pin;
 
-  switch (cmd)
-  {
-    case CMD_IGNITER:
-      port = IGINITER_GPIO_Port;
-      pin = IGINITER_Pin;
+  switch (cmd) {
+  case CMD_IGNITER:
+    port = IGINITER_GPIO_Port;
+    pin = IGINITER_Pin;
 
-      if (val == CMD_ON)
-      {
-        HAL_GPIO_WritePin(IGINITER_GPIO_Port, IGINITER_Pin, GPIO_PIN_SET);
-        state = IGNITER_FIRING;
-        igniter_start = HAL_GetTick();
+    if (val == CMD_ON) {
+      HAL_GPIO_WritePin(IGINITER_GPIO_Port, IGINITER_Pin, GPIO_PIN_SET);
+      state = IGNITER_FIRING;
+      igniter_start = HAL_GetTick();
 
-        GPIO_PinState curr = HAL_GPIO_ReadPin(port, pin);
-        sendAck(cmd, curr);
-        return;
-      }
-      else if (val == CMD_OFF)
-      {
-        // abort!!!!
-        HAL_GPIO_WritePin(IGINITER_GPIO_Port, IGINITER_Pin, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(PILOT_VALVE_GPIO_Port, PILOT_VALVE_Pin, GPIO_PIN_RESET);
-        state = IGNITER_IDLE;
-
-        GPIO_PinState curr = HAL_GPIO_ReadPin(port, pin);
-        sendAck(cmd, curr);
-        return;
-      }
-
-    case CMD_PILOT:
-      port = PILOT_VALVE_GPIO_Port;
-      pin = PILOT_VALVE_Pin;
-      break;
-
-    case CMD_TANKS:
-      port = TANKS_GPIO_Port;
-      pin = TANKS_Pin;
-      break;
-
-    case CMD_SPARE:
-      port = SPARE_GPIO_Port;
-      pin = SPARE_Pin;
-      break;
-
-    default:
+      GPIO_PinState curr = HAL_GPIO_ReadPin(port, pin);
+      sendAck(cmd, curr);
       return;
+    } else if (val == CMD_OFF) {
+      // abort!!!!
+      HAL_GPIO_WritePin(IGINITER_GPIO_Port, IGINITER_Pin, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(PILOT_VALVE_GPIO_Port, PILOT_VALVE_Pin, GPIO_PIN_RESET);
+      state = IGNITER_IDLE;
+
+      GPIO_PinState curr = HAL_GPIO_ReadPin(port, pin);
+      sendAck(cmd, curr);
+      return;
+    }
+
+  case CMD_PILOT:
+    port = PILOT_VALVE_GPIO_Port;
+    pin = PILOT_VALVE_Pin;
+    break;
+
+  case CMD_TANKS:
+    port = TANKS_GPIO_Port;
+    pin = TANKS_Pin;
+    break;
+
+  case CMD_SPARE:
+    port = SPARE_GPIO_Port;
+    pin = SPARE_Pin;
+    break;
+
+  default:
+    return;
   }
-  switch (val)
-  {
-    case CMD_ON:
-      HAL_GPIO_WritePin(port, pin, GPIO_PIN_SET);
-      break;
+  switch (val) {
+  case CMD_ON:
+    HAL_GPIO_WritePin(port, pin, GPIO_PIN_SET);
+    break;
 
-    case CMD_OFF:
-      HAL_GPIO_WritePin(port, pin, GPIO_PIN_RESET);
-      break;
+  case CMD_OFF:
+    HAL_GPIO_WritePin(port, pin, GPIO_PIN_RESET);
+    break;
 
-    default:
-      return;
+  default:
+    return;
   }
 
   GPIO_PinState curr = HAL_GPIO_ReadPin(port, pin);
   sendAck(cmd, curr);
 }
 
-void handleIgniterSequence(void)
-{
-  uint32_t elapsed;
+void handleIgniterSequence(void) {
+  uint32_t now = HAL_GetTick();
 
-  switch (state)
-  {
-    case IGNITER_IDLE:
-      break;
-    case IGNITER_FIRING:
-      elapsed = HAL_GetTick() - igniter_start;
-      if (elapsed >= PILOT_VALVE_DELAY)
-      {
-        HAL_GPIO_WritePin(PILOT_VALVE_GPIO_Port, PILOT_VALVE_Pin, GPIO_PIN_SET);
-        sendAck(CMD_PILOT, GPIO_PIN_SET);
-        state = IGNITER_PILOT;
-      }
-      break;
-    case IGNITER_PILOT:
-      elapsed = HAL_GetTick() - igniter_start;
-      if (elapsed > IGNITER_TURN_OFF)
-      {
-        HAL_GPIO_WritePin(IGINITER_GPIO_Port, IGINITER_Pin, GPIO_PIN_RESET);
-        sendAck(CMD_IGNITER, GPIO_PIN_RESET);
-        state = IGNITER_COMPLETE;
-      }
-      break;
-    case IGNITER_COMPLETE:
-      state = IGNITER_IDLE;
-      break;
+  switch (state) {
+  case IGNITER_IDLE:
+    break;
+
+  case IGNITER_FIRING:
+    if ((now - igniter_start) >= PILOT_VALVE_DELAY) {
+      HAL_GPIO_WritePin(PILOT_VALVE_GPIO_Port, PILOT_VALVE_Pin, GPIO_PIN_SET);
+      sendAck(CMD_PILOT, GPIO_PIN_SET);
+
+      pilot_start = now;          // start pilot-on timer
+      state = IGNITER_PILOT;
+    }
+    break;
+
+  case IGNITER_PILOT:
+    // turn pilot off after 1.5 seconds
+    if ((now - pilot_start) >= PILOT_ON_DURATION_MS) {
+      HAL_GPIO_WritePin(PILOT_VALVE_GPIO_Port, PILOT_VALVE_Pin, GPIO_PIN_RESET);
+      sendAck(CMD_PILOT, GPIO_PIN_RESET);
+      state = IGNITER_PILOT_OFF;
+    }
+    break;
+
+  case IGNITER_PILOT_OFF:
+    // keep existing igniter turn-off timing (based on igniter_start)
+    if ((now - igniter_start) > IGNITER_TURN_OFF) {
+      HAL_GPIO_WritePin(IGINITER_GPIO_Port, IGINITER_Pin, GPIO_PIN_RESET);
+      sendAck(CMD_IGNITER, GPIO_PIN_RESET);
+      state = IGNITER_COMPLETE;
+    }
+    break;
+
+  case IGNITER_COMPLETE:
+    state = IGNITER_IDLE;
+    break;
   }
 }
 
-void ad7193_init()
-{
-  // TODO
+
+void ad7193_init() {
+
+  // Configure AD7193 registers
+  uint32_t config =
+      AD7193_CONFIG_CHOP(0) |   // CHOP = 0 (chop disabled for faster conversion)
+      AD7193_CONFIG_REFSEL(0) | // REFSEL = 0 (use REFIN1)
+      AD7193_CONFIG_PSEUDO(0) | // Pseudo
+      AD7193_CONFIG_SHORT(0) |  // Short
+      AD7193_CONFIG_TEMP(0) |   // TEMP
+      AD7193_CONFIG_CH7(0) |    // CH7
+      AD7193_CONFIG_CH6(0) |    // CH6
+      AD7193_CONFIG_CH5(0) |    // CH5
+      AD7193_CONFIG_CH4(0) |    // CH4
+      AD7193_CONFIG_CH3(0) |    // CH3
+      AD7193_CONFIG_CH2(0) |    // CH2
+      AD7193_CONFIG_CH1(1) |    // CH1
+      AD7193_CONFIG_CH0(1) |    // CH0 (AIN1-AIN2 pair enabled)
+      AD7193_CONFIG_BURN(0) |   // BURN = 0
+      AD7193_CONFIG_REFDET(0) | // REFDET = 0
+      AD7193_CONFIG_BUF(1) |    // BUF (buffer enabled) // HAS TO BE ENABLED FOR ADC TO WORK
+      AD7193_CONFIG_UB(0) | // U/B  (When this bit is set, unipolar operation is selected.) // HAS
+                            // TO BE bipolar FOR ADC TO WORK
+      AD7193_CONFIG_G2(1) | // G2
+      AD7193_CONFIG_G1(1) | // G1
+      AD7193_CONFIG_G0(1);  // G0
+#define AD7193_GAIN 128
+
+  // Configure mode register for continuous conversion
+  uint32_t mode =
+      AD7193_MODE_MD2(0) |     // MD2 = 0
+      AD7193_MODE_MD1(0) |     // MD1 = 0
+      AD7193_MODE_MD0(0) |     // MD0 = 0 (Continuous conversion mode)
+      AD7193_MODE_DAT_STA(1) | // DAT_STA = 1 This bit enables the transmission of status register
+                               // contents after each data register read.
+      AD7193_MODE_CLK1(0) |    // CLK1
+      AD7193_MODE_CLK0(0) |    // CLK0
+      AD7193_MODE_AVG1(0) |    // AVG1 = 0
+      AD7193_MODE_AVG0(0) |    // AVG0 = 0 (no averaging)
+      AD7193_MODE_SINC3(0) |   // SINC3 = 0 (use SINC4 filter)
+      AD7193_MODE_ENPAR(0) |   // ENPAR = 0
+      AD7193_MODE_CLK_DIV(0) | // CLK_DIV = 0
+      AD7193_MODE_SINGLE(0) |  // Single = 0
+      AD7193_MODE_REJ60(0) |   // REJ60 = 0
+      AD7193_MODE_FS(48);      // FS[9:0] = 96 (50Hz output rate)
+
+  // Initialize AD7193 driver with configurable pins
+  if (AD7193_Init(&hadc7193, &hspi1, ADC_CS_GPIO_Port, ADC_CS_Pin, DATA_READY_GPIO_Port,
+                  DATA_READY_Pin, VREF, AD7193_GAIN) != HAL_OK) {
+    Error_Handler();
+  }
+
+  // Reset AD7193
+  if (AD7193_Reset(&hadc7193) != HAL_OK) {
+    Error_Handler();
+  }
+
+  AD7193_Configure(&hadc7193, config, mode);
+  AD7193_EnableContinuousRead(&hadc7193);
+  AD7193_SetCSlowForTheInterruptToWork(&hadc7193);
+}
+
+// Redirect printf to USB CDC
+int _write(int file, char *ptr, int len) {
+  // This is the function that printf calls internally
+  // Send data through USB CDC
+  CDC_Transmit_FS((uint8_t *)ptr, len);
+  return len;
 }
 
 /* USER CODE END 0 */
@@ -288,25 +404,30 @@ int main(void)
   MX_DMA_Init();
   MX_SPI1_Init();
   MX_USART1_UART_Init();
-  MX_USB_PCD_Init();
   MX_ADC1_Init();
+  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
   ad7193_init();
   HAL_UART_Receive_IT(&huart1, uart_rx_buf, UART_BUFFER_LEN);
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)internal_adc_buffer, 1);
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)internal_adc_buffer, 1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  while (1)
+  while (1) 
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+    // HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, 1);
+    // HAL_Delay(100);
+    // HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, 0);
+    // HAL_Delay(100);
+
     handleIgniterSequence();
-    if (cmd_rdy)
-    {
+    if (cmd_rdy) {
       // atomic clear
       __disable_irq();
       cmd_rdy = 0;
@@ -315,14 +436,89 @@ int main(void)
       __enable_irq();
       handleCommand(cmd, val);
     }
-    if (ad7193_ready)
+
+    if (ad7193_ready) 
     {
       ad7193_ready = 0;
+      uint32_t dataReg = 0;
+      uint8_t statusReg = 0;
+
+      // HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
+      // if (AD7193_ReadData_WithContinuousReadMode_WithCSPinALwaysLowToMakeTheInterruptWork_WithDAT_STAModeSet(
+      //         &hadc7193, &dataReg, &statusReg) != HAL_OK) {
+      //   // TODO: HANDLE ERROR
+      // }
+      // HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
+      // // I guess that ad7193_buffer stores the raw bytes and then we want to do the conversion on
+      // // the receiving end? We send raw data. float voltage = 0; if
+      // float voltage = 0;
+      // if (AD7193_BipolarModeConvertToVoltage(&hadc7193, dataReg, &voltage) != HAL_OK) {
+      //   // TODO: HANDLE ERROR
+      // }
+
+      // AD7193_StatusRegisterTypeDef statusRegStruct;
+      // if (AD7193_RawStatusRegisterToStruct(&statusReg, &statusRegStruct) != HAL_OK) {
+      //   // TODO: HANDLE ERROR
+      // }
+
+      // // printf("AD7193 Data Register: 0x%06lX (%lu)\r\n", dataReg, dataReg);
+      // // printf("AD7193 Status Register: 0x%02X (%u)\r\n", statusReg, statusReg);
+
+      // int voltage_mV = (int)(voltage * 1000000000000);
+      // // printf("%d\n", statusRegStruct.channelNum);
+      // if (statusRegStruct.channelNum == 0) {
+      //   printf("A:%d\n", -voltage_mV);
+      // } 
+
+      // if (statusRegStruct.channelNum == 1) {
+      //   printf("B:%d\n", -voltage_mV);
+      // }
+      
+      HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
+      (void)AD7193_ReadData_WithContinuousReadMode_WithCSPinALwaysLowToMakeTheInterruptWork_WithDAT_STAModeSet
+      (
+        &hadc7193, &dataReg, &statusReg
+      );
+      HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
+      AD7193_StatusRegisterTypeDef statusRegStruct;
+      (void)AD7193_RawStatusRegisterToStruct
+      (
+        &statusReg, &statusRegStruct
+      );
+
+      uint8_t ch = (uint8_t)statusRegStruct.channelNum;
+      if (ch < CHANNELS) 
+      {
+        ad7193_buffer[ch] = dataReg;
+        fresh_mask |= (uint8_t)(1u << ch);
+      }
+
+      if (fresh_mask == READY_MASK) 
+      {
+        fresh_mask = 0;
+
+        float volts[CHANNELS] = {0};
+        for (int i = 0; i < CHANNELS; i++) 
+        {
+          (void)AD7193_BipolarModeConvertToVoltage
+          (
+            &hadc7193, ad7193_buffer[i], &volts[i]
+          );
+        }
+
+        TrySendDataPacket_IT(volts, internal_adc_buffer[0]);
+      }
+
+      // ad7193_buffer[statusRegStruct.channelNum] = dataReg;
+      // fresh_mask |= 1 << statusRegStruct.channelNum;
+
       /**
-      1. Read over SPI when interrupt is triggered
-      2. Identify channel -> curr_channel
-      3. Store three bytes in ad7193_buffer[curr_channel]
-      4. Update fresh_mask for the current channel (fresh_mask |= 1 << curr_channel)
+      1. Read over SPI when interrupt is triggered // DONE
+      2. Identify channel -> curr_channel // DONE
+      3. Store three bytes in ad7193_buffer[curr_channel] // DONE
+      4. Update fresh_mask for the current channel (fresh_mask |= 1 << curr_channel) // DONE
       5. Check if fresh_mask == READY_MASK
          a. Collect internal ADC data from DMA buffer
          b. Send packet over non-blocking call
@@ -481,7 +677,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 57600;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -495,37 +691,6 @@ static void MX_USART1_UART_Init(void)
   /* USER CODE BEGIN USART1_Init 2 */
 
   /* USER CODE END USART1_Init 2 */
-
-}
-
-/**
-  * @brief USB Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USB_PCD_Init(void)
-{
-
-  /* USER CODE BEGIN USB_Init 0 */
-
-  /* USER CODE END USB_Init 0 */
-
-  /* USER CODE BEGIN USB_Init 1 */
-
-  /* USER CODE END USB_Init 1 */
-  hpcd_USB_FS.Instance = USB;
-  hpcd_USB_FS.Init.dev_endpoints = 8;
-  hpcd_USB_FS.Init.speed = PCD_SPEED_FULL;
-  hpcd_USB_FS.Init.low_power_enable = DISABLE;
-  hpcd_USB_FS.Init.lpm_enable = DISABLE;
-  hpcd_USB_FS.Init.battery_charging_enable = DISABLE;
-  if (HAL_PCD_Init(&hpcd_USB_FS) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USB_Init 2 */
-
-  /* USER CODE END USB_Init 2 */
 
 }
 
@@ -558,15 +723,27 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(ADC_CS_GPIO_Port, ADC_CS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, PILOT_VALVE_Pin|TANKS_Pin|IGINITER_Pin|SPARE_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, PILOT_VALVE_Pin|TANKS_Pin|IGINITER_Pin|SPARE_Pin
+                          |GPIO_PIN_3, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PC13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pin : ADC_CS_Pin */
   GPIO_InitStruct.Pin = ADC_CS_Pin;
@@ -588,22 +765,29 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(DATA_READY_GPIO_Port, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : PB3 */
+  GPIO_InitStruct.Pin = GPIO_PIN_3;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 1, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-  if (huart->Instance == USART1)
-  {
-    if (cmd_rdy == 0)
-    {
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+  if (huart->Instance == USART1) {
+    if (cmd_rdy == 0) {
       uint8_t header = uart_rx_buf[0];
       uint8_t crc = uart_rx_buf[3];
-      if (header == CMD_HEADER && computeCRC(uart_rx_buf, (UART_BUFFER_LEN-1)) == crc)
-      {
+      if (header == CMD_HEADER && computeCRC(uart_rx_buf, (UART_BUFFER_LEN - 1)) == crc) {
         memcpy(cmd_buf, uart_rx_buf, UART_BUFFER_LEN);
         cmd_rdy = 1;
       }
@@ -612,18 +796,14 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   }
 }
 
-void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
-{
-  if (huart->Instance == USART1)
-  {
-    uart_busy = 0;
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+  if (huart->Instance == USART1) {
+    uart_tx_busy = 0;
   }
 }
 
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-  if (GPIO_Pin == DATA_READY_Pin)
-  {
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+  if (GPIO_Pin == DATA_READY_Pin) {
     ad7193_ready = 1;
   }
 }
@@ -638,8 +818,7 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
-  while (1)
-  {
+  while (1) {
   }
   /* USER CODE END Error_Handler_Debug */
 }
