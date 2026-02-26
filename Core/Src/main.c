@@ -19,7 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "usb_device.h"
-#include "usbd_cdc_if.h"
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdint.h>
@@ -28,6 +28,7 @@
 #include <unistd.h>
 #include <stddef.h>
 #include "ad7193.h"
+#include "usbd_cdc_if.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -42,8 +43,10 @@ typedef struct __attribute__((packed)) {
   uint32_t timestamp;               // HAL_GetTick()
   float ad7193_data[CHANNELS];      // floating point values for AD7193
   uint16_t stm32_adc;               // 16-bit internal ADC
+  float battery_voltage;            // Battery voltage in volts
   uint16_t crc;                     // CRC-16
 } DataPacket_t;
+_Static_assert(sizeof(DataPacket_t) == 22, "DataPacket_t must be 22 bytes");
 
 typedef enum { IGNITER_IDLE, IGNITER_FIRING, IGNITER_PILOT, IGNITER_PILOT_OFF, IGNITER_COMPLETE } igniterState_t;
 
@@ -72,6 +75,12 @@ typedef enum { IGNITER_IDLE, IGNITER_FIRING, IGNITER_PILOT, IGNITER_PILOT_OFF, I
 #define PILOT_VALVE_DELAY 5000
 #define IGNITER_TURN_OFF 10000
 #define UART_ACK_TIMEOUT 2000
+
+#define BATTERY_ADC_AVG_SAMPLES 32u
+// Battery calibration points:
+// ADC 1577 -> 14V, ADC 1464 -> 13V
+#define BATTERY_CAL_SLOPE_V_PER_COUNT ((14.0f - 13.0f) / (1577.0f - 1464.0f))
+#define BATTERY_CAL_OFFSET_V          (14.0f - (BATTERY_CAL_SLOPE_V_PER_COUNT * 1577.0f))
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -81,6 +90,7 @@ typedef enum { IGNITER_IDLE, IGNITER_FIRING, IGNITER_PILOT, IGNITER_PILOT_OFF, I
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
+ADC_HandleTypeDef hadc2;
 DMA_HandleTypeDef hdma_adc1;
 
 SPI_HandleTypeDef hspi1;
@@ -115,6 +125,7 @@ static void MX_DMA_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_ADC1_Init(void);
+static void MX_ADC2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -163,8 +174,38 @@ void sendAck(uint8_t cmd, GPIO_PinState state) {
   }
 }
 
+static inline uint16_t ReadBatteryAdc2Sample(void) {
+  uint32_t sum = 0;
+  uint16_t valid_samples = 0;
+
+  for (uint8_t i = 0; i < BATTERY_ADC_AVG_SAMPLES; i++) {
+    if (HAL_ADC_Start(&hadc2) == HAL_OK) {
+      if (HAL_ADC_PollForConversion(&hadc2, 2) == HAL_OK) {
+        sum += HAL_ADC_GetValue(&hadc2);
+        valid_samples++;
+      }
+      (void)HAL_ADC_Stop(&hadc2);
+    }
+  }
+
+  if (valid_samples == 0) {
+    return 0;
+  }
+
+  return (uint16_t)(sum / valid_samples);
+}
+
+static inline float BatteryAdcToVolts(uint16_t adc_sample) {
+  float volts = (BATTERY_CAL_SLOPE_V_PER_COUNT * (float)adc_sample) + BATTERY_CAL_OFFSET_V;
+  if (volts < 0.0f) {
+    volts = 0.0f;
+  }
+  return volts;
+}
+
 static inline void TrySendDataPacket_IT(const float ad_volts[CHANNELS],
-                                       uint16_t stm32_adc_sample) {
+                                       uint16_t stm32_adc_sample,
+                                       float battery_adc_raw) {
   if (uart_tx_busy) {
     dropped_pkts++;
     return; // simplest policy: drop if UART is busy
@@ -184,6 +225,7 @@ static inline void TrySendDataPacket_IT(const float ad_volts[CHANNELS],
     p->ad7193_data[i] = -ad_volts[i];
   }
   p->stm32_adc = stm32_adc_sample;
+  p->battery_voltage = battery_adc_raw;
 
   p->crc = computeCRC_16((const uint8_t*)p, (uint16_t)offsetof(DataPacket_t, crc));
 
@@ -406,6 +448,7 @@ int main(void)
   MX_USART1_UART_Init();
   MX_ADC1_Init();
   MX_USB_DEVICE_Init();
+  MX_ADC2_Init();
   /* USER CODE BEGIN 2 */
   ad7193_init();
   HAL_UART_Receive_IT(&huart1, uart_rx_buf, UART_BUFFER_LEN);
@@ -508,7 +551,9 @@ int main(void)
           );
         }
 
-        TrySendDataPacket_IT(volts, internal_adc_buffer[0]);
+        uint16_t battery_adc2_sample = ReadBatteryAdc2Sample();
+        float battery_voltage = BatteryAdcToVolts(battery_adc2_sample);
+        TrySendDataPacket_IT(volts, internal_adc_buffer[0], battery_voltage);
       }
 
       // ad7193_buffer[statusRegStruct.channelNum] = dataReg;
@@ -624,6 +669,58 @@ static void MX_ADC1_Init(void)
 }
 
 /**
+  * @brief ADC2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC2_Init(void)
+{
+
+  /* USER CODE BEGIN ADC2_Init 0 */
+
+  /* USER CODE END ADC2_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC2_Init 1 */
+
+  /* USER CODE END ADC2_Init 1 */
+
+  /** Common config
+  */
+  hadc2.Instance = ADC2;
+  hadc2.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc2.Init.ContinuousConvMode = DISABLE;
+  hadc2.Init.DiscontinuousConvMode = DISABLE;
+  hadc2.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc2.Init.NbrOfConversion = 1;
+  if (HAL_ADC_Init(&hadc2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  if (HAL_ADCEx_Calibration_Start(&hadc2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_3;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC2_Init 2 */
+
+  /* USER CODE END ADC2_Init 2 */
+
+}
+
+/**
   * @brief SPI1 Initialization Function
   * @param None
   * @retval None
@@ -735,8 +832,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(ADC_CS_GPIO_Port, ADC_CS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, PILOT_VALVE_Pin|TANKS_Pin|IGINITER_Pin|SPARE_Pin
-                          |GPIO_PIN_3, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, IGINITER_Pin|SPARE_Pin|PILOT_VALVE_Pin|TANKS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : PC13 */
   GPIO_InitStruct.Pin = GPIO_PIN_13;
@@ -752,8 +848,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(ADC_CS_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PILOT_VALVE_Pin TANKS_Pin IGINITER_Pin SPARE_Pin */
-  GPIO_InitStruct.Pin = PILOT_VALVE_Pin|TANKS_Pin|IGINITER_Pin|SPARE_Pin;
+  /*Configure GPIO pins : IGINITER_Pin SPARE_Pin */
+  GPIO_InitStruct.Pin = IGINITER_Pin|SPARE_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -765,8 +861,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(DATA_READY_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PB3 */
-  GPIO_InitStruct.Pin = GPIO_PIN_3;
+  /*Configure GPIO pins : PILOT_VALVE_Pin TANKS_Pin */
+  GPIO_InitStruct.Pin = PILOT_VALVE_Pin|TANKS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
