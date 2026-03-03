@@ -107,9 +107,12 @@ uint8_t cmd_buf[UART_BUFFER_LEN];
 
 volatile uint8_t ad7193_ready = 0;
 volatile uint16_t internal_adc_buffer[1];
-uint8_t fresh_mask = 0;
+uint8_t ad7193_valid_mask = 0;
 uint8_t sequence = 0;
-uint32_t ad7193_buffer[CHANNELS];
+float ad7193_latest_volts[CHANNELS] = {0.0f};
+static uint32_t battery_adc_accum = 0;
+static uint8_t battery_adc_count = 0;
+static float latest_battery_voltage = 0.0f;
 DataPacket_t pkt_buf[2];
 static volatile uint8_t pkt_idx = 0;       // which buffer to build next
 static volatile uint32_t dropped_pkts = 0; // optional debug
@@ -174,33 +177,32 @@ void sendAck(uint8_t cmd, GPIO_PinState state) {
   }
 }
 
-static inline uint16_t ReadBatteryAdc2Sample(void) {
-  uint32_t sum = 0;
-  uint16_t valid_samples = 0;
-
-  for (uint8_t i = 0; i < BATTERY_ADC_AVG_SAMPLES; i++) {
-    if (HAL_ADC_Start(&hadc2) == HAL_OK) {
-      if (HAL_ADC_PollForConversion(&hadc2, 2) == HAL_OK) {
-        sum += HAL_ADC_GetValue(&hadc2);
-        valid_samples++;
-      }
-      (void)HAL_ADC_Stop(&hadc2);
-    }
-  }
-
-  if (valid_samples == 0) {
-    return 0;
-  }
-
-  return (uint16_t)(sum / valid_samples);
-}
-
 static inline float BatteryAdcToVolts(uint16_t adc_sample) {
   float volts = (BATTERY_CAL_SLOPE_V_PER_COUNT * (float)adc_sample) + BATTERY_CAL_OFFSET_V;
   if (volts < 0.0f) {
     volts = 0.0f;
   }
   return volts;
+}
+
+static inline void BatteryAdc_UpdateNonBlocking(void) {
+  // Take one ADC2 sample per call; publish a new averaged battery voltage every
+  // BATTERY_ADC_AVG_SAMPLES samples.
+  if (HAL_ADC_Start(&hadc2) == HAL_OK) {
+    // Timeout must be >0 or conversions are frequently missed.
+    if (HAL_ADC_PollForConversion(&hadc2, 2) == HAL_OK) {
+      battery_adc_accum += HAL_ADC_GetValue(&hadc2);
+      battery_adc_count++;
+
+      if (battery_adc_count >= BATTERY_ADC_AVG_SAMPLES) {
+        uint16_t averaged_sample = (uint16_t)(battery_adc_accum / BATTERY_ADC_AVG_SAMPLES);
+        latest_battery_voltage = BatteryAdcToVolts(averaged_sample);
+        battery_adc_accum = 0;
+        battery_adc_count = 0;
+      }
+    }
+    (void)HAL_ADC_Stop(&hadc2);
+  }
 }
 
 static inline void TrySendDataPacket_IT(const float ad_volts[CHANNELS],
@@ -384,9 +386,9 @@ void ad7193_init() {
       AD7193_MODE_SINC3(0) |   // SINC3 = 0 (use SINC4 filter)
       AD7193_MODE_ENPAR(0) |   // ENPAR = 0
       AD7193_MODE_CLK_DIV(0) | // CLK_DIV = 0
-      AD7193_MODE_SINGLE(0) |  // Single = 0
+      AD7193_MODE_SINGLE(1) |  // Single = 0
       AD7193_MODE_REJ60(0) |   // REJ60 = 0
-      AD7193_MODE_FS(1);      // FS[9:0] = 96 (50Hz output rate)
+      AD7193_MODE_FS(2);      // FS[9:0] = 96 (50Hz output rate)
 
   // Initialize AD7193 driver with configurable pins
   if (AD7193_Init(&hadc7193, &hspi1, ADC_CS_GPIO_Port, ADC_CS_Pin, DATA_READY_GPIO_Port,
@@ -470,6 +472,8 @@ int main(void)
     // HAL_Delay(100);
 
     handleIgniterSequence();
+    BatteryAdc_UpdateNonBlocking();
+
     if (cmd_rdy) {
       // atomic clear
       __disable_irq();
@@ -534,41 +538,16 @@ int main(void)
       uint8_t ch = (uint8_t)statusRegStruct.channelNum;
       if (ch < CHANNELS) 
       {
-        ad7193_buffer[ch] = dataReg;
-        fresh_mask |= (uint8_t)(1u << ch);
+        (void)AD7193_BipolarModeConvertToVoltage(&hadc7193, dataReg, &ad7193_latest_volts[ch]);
+        ad7193_valid_mask |= (uint8_t)(1u << ch);
       }
 
-      if (fresh_mask == READY_MASK) 
+      // Send on each new sample; channels that did not update in this cycle use
+      // their last-known values.
+      if (ad7193_valid_mask == READY_MASK) 
       {
-        fresh_mask = 0;
-
-        float volts[CHANNELS] = {0};
-        for (int i = 0; i < CHANNELS; i++) 
-        {
-          (void)AD7193_BipolarModeConvertToVoltage
-          (
-            &hadc7193, ad7193_buffer[i], &volts[i]
-          );
-        }
-
-        uint16_t battery_adc2_sample = ReadBatteryAdc2Sample();
-        float battery_voltage = BatteryAdcToVolts(battery_adc2_sample);
-        TrySendDataPacket_IT(volts, internal_adc_buffer[0], battery_voltage);
+        TrySendDataPacket_IT(ad7193_latest_volts, internal_adc_buffer[0], latest_battery_voltage);
       }
-
-      // ad7193_buffer[statusRegStruct.channelNum] = dataReg;
-      // fresh_mask |= 1 << statusRegStruct.channelNum;
-
-      /**
-      1. Read over SPI when interrupt is triggered // DONE
-      2. Identify channel -> curr_channel // DONE
-      3. Store three bytes in ad7193_buffer[curr_channel] // DONE
-      4. Update fresh_mask for the current channel (fresh_mask |= 1 << curr_channel) // DONE
-      5. Check if fresh_mask == READY_MASK
-         a. Collect internal ADC data from DMA buffer
-         b. Send packet over non-blocking call
-         c. Reset fresh_mask flag
-      */
     }
   }
   /* USER CODE END 3 */
