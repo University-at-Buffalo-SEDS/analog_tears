@@ -81,6 +81,10 @@ typedef enum { IGNITER_IDLE, IGNITER_FIRING, IGNITER_PILOT, IGNITER_PILOT_OFF, I
 // ADC 1577 -> 14V, ADC 1464 -> 13V
 #define BATTERY_CAL_SLOPE_V_PER_COUNT ((14.0f - 13.0f) / (1577.0f - 1464.0f))
 #define BATTERY_CAL_OFFSET_V          (14.0f - (BATTERY_CAL_SLOPE_V_PER_COUNT * 1577.0f))
+// Empirical gain trim: measured 13.2 V while true battery was 14.0 V.
+#define BATTERY_CAL_GAIN_TRIM         (14.0f / 13.2f)
+// Empirical offset trim after gain correction.
+#define BATTERY_CAL_OFFSET_TRIM_V     (-0.1f)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -178,7 +182,9 @@ void sendAck(uint8_t cmd, GPIO_PinState state) {
 }
 
 static inline float BatteryAdcToVolts(uint16_t adc_sample) {
-  float volts = (BATTERY_CAL_SLOPE_V_PER_COUNT * (float)adc_sample) + BATTERY_CAL_OFFSET_V;
+  float volts = ((BATTERY_CAL_SLOPE_V_PER_COUNT * (float)adc_sample) + BATTERY_CAL_OFFSET_V) *
+                BATTERY_CAL_GAIN_TRIM;
+  volts += BATTERY_CAL_OFFSET_TRIM_V;
   if (volts < 0.0f) {
     volts = 0.0f;
   }
@@ -388,7 +394,7 @@ void ad7193_init() {
       AD7193_MODE_CLK_DIV(0) | // CLK_DIV = 0
       AD7193_MODE_SINGLE(1) |  // Single = 0
       AD7193_MODE_REJ60(0) |   // REJ60 = 0
-      AD7193_MODE_FS(2);      // FS[9:0] = 96 (50Hz output rate)
+      AD7193_MODE_FS(2);      // FS[9:0]
 
   // Initialize AD7193 driver with configurable pins
   if (AD7193_Init(&hadc7193, &hspi1, ADC_CS_GPIO_Port, ADC_CS_Pin, DATA_READY_GPIO_Port,
