@@ -386,7 +386,7 @@ void ad7193_init() {
       AD7193_MODE_CLK_DIV(0) | // CLK_DIV = 0
       AD7193_MODE_SINGLE(0) |  // Single = 0
       AD7193_MODE_REJ60(0) |   // REJ60 = 0
-      AD7193_MODE_FS(48);      // FS[9:0] = 96 (50Hz output rate)
+      AD7193_MODE_FS(1);      // FS[9:0] = 96 (50Hz output rate)
 
   // Initialize AD7193 driver with configurable pins
   if (AD7193_Init(&hadc7193, &hspi1, ADC_CS_GPIO_Port, ADC_CS_Pin, DATA_READY_GPIO_Port,
