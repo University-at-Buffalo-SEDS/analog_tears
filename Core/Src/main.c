@@ -105,6 +105,8 @@ UART_HandleTypeDef huart1;
 AD7193_HandleTypeDef hadc7193;
 
 uint8_t ack_buffer[4];
+static uint8_t pending_ack_buffer[4];
+static volatile uint8_t pending_ack_ready = 0;
 
 volatile uint8_t cmd_rdy = 0;
 uint8_t cmd_buf[UART_BUFFER_LEN];
@@ -170,14 +172,27 @@ uint16_t computeCRC_16(const uint8_t *data, uint16_t len) {
 }
 
 void sendAck(uint8_t cmd, GPIO_PinState state) {
-  if (uart_tx_busy) return;
+  uint8_t frame[4];
+  frame[0] = ACK_HEADER;
+  frame[1] = cmd;
+  frame[2] = (state == GPIO_PIN_SET) ? 1 : 0;
+  frame[3] = computeCRC(frame, 3);
+
+  __disable_irq();
+  if (uart_tx_busy) {
+    memcpy(pending_ack_buffer, frame, sizeof(pending_ack_buffer));
+    pending_ack_ready = 1;
+    __enable_irq();
+    return;
+  }
+  memcpy(ack_buffer, frame, sizeof(ack_buffer));
   uart_tx_busy = 1;
-  ack_buffer[0] = ACK_HEADER;
-  ack_buffer[1] = cmd;
-  ack_buffer[2] = (state == GPIO_PIN_SET) ? 1 : 0;
-  ack_buffer[3] = computeCRC(ack_buffer, 3);
+  __enable_irq();
+
   if (HAL_UART_Transmit_IT(&huart1, ack_buffer, 4) != HAL_OK) {
+    __disable_irq();
     uart_tx_busy = 0;
+    __enable_irq();
   }
 }
 
@@ -874,6 +889,14 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
   if (huart->Instance == USART1) {
+    if (pending_ack_ready) {
+      memcpy(ack_buffer, pending_ack_buffer, sizeof(ack_buffer));
+      pending_ack_ready = 0;
+      if (HAL_UART_Transmit_IT(&huart1, ack_buffer, 4) != HAL_OK) {
+        uart_tx_busy = 0;
+      }
+      return;
+    }
     uart_tx_busy = 0;
   }
 }
